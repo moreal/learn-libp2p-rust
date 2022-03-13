@@ -1,6 +1,3 @@
-use std::hash::Hasher;
-use std::hash::Hash;
-use std::collections::hash_map::DefaultHasher;
 use std::time::Duration;
 use async_std::io;
 use futures::prelude::*;
@@ -25,10 +22,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let gossipsub_config = gossipsub::GossipsubConfigBuilder::default()
                 .heartbeat_interval(Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
                 .validation_mode(ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
-                .message_id_fn(|message: &GossipsubMessage| {
-                    let mut s = DefaultHasher::new();
-                    message.data.hash(&mut s);
-                    MessageId::from(s.finish().to_string())
+                .message_id_fn(|_: &GossipsubMessage| {
+                    MessageId::from(uuid::Uuid::new_v4().to_hyphenated().to_string())
                 }) // content-address messages. No two messages of the
                 // same content will be propagated.
                 .build()
