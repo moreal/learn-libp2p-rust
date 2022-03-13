@@ -1,6 +1,14 @@
+use std::hash::Hasher;
+use std::hash::Hash;
+use std::collections::hash_map::DefaultHasher;
+use std::time::Duration;
+use async_std::io;
 use futures::prelude::*;
-use libp2p::{identity, Multiaddr, PeerId};
-use libp2p::ping::{Ping, PingConfig};
+use futures::select;
+use libp2p::gossipsub::GossipsubEvent;
+use libp2p::gossipsub::IdentTopic as Topic;
+use libp2p::gossipsub::{MessageAuthenticity, ValidationMode, GossipsubMessage, MessageId};
+use libp2p::{identity, Multiaddr, PeerId, gossipsub};
 use libp2p::swarm::{Swarm, SwarmEvent};
 use std::error::Error;
 
@@ -10,11 +18,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let local_peer_id = PeerId::from(local_key.public());
     println!("Local peer id: {:?}", local_peer_id);
 
-    let transport = libp2p::development_transport(local_key).await?;
+    let transport = libp2p::development_transport(local_key.clone()).await?;
 
-    let behaviour = Ping::new(PingConfig::new().with_keep_alive(true));
+    let topic = Topic::new("test-net");
+    let mut swarm = {
+        let gossipsub_config = gossipsub::GossipsubConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(10)) // This is set to aid debugging by not cluttering the log space
+                .validation_mode(ValidationMode::Strict) // This sets the kind of message validation. The default is Strict (enforce message signing)
+                .message_id_fn(|message: &GossipsubMessage| {
+                    let mut s = DefaultHasher::new();
+                    message.data.hash(&mut s);
+                    MessageId::from(s.finish().to_string())
+                }) // content-address messages. No two messages of the
+                // same content will be propagated.
+                .build()
+                .expect("Valid config");
+        let mut gossipsub: gossipsub::Gossipsub =
+            gossipsub::Gossipsub::new(MessageAuthenticity::Signed(local_key), gossipsub_config)
+                .expect("Correct configuration");
 
-    let mut swarm = Swarm::new(transport, behaviour, local_peer_id);
+        if let Some(explicit) = std::env::args().nth(2) {
+            let explicit = explicit.clone();
+            match explicit.parse() {
+                Ok(id) => gossipsub.add_explicit_peer(&id),
+                Err(err) => println!("Failed to parse explicit peer id: {:?}", err),
+            }
+        }
+
+        gossipsub.subscribe(&topic).unwrap();
+
+        Swarm::new(transport, gossipsub, local_peer_id)
+    };
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
@@ -24,11 +58,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("Dialed {}", addr)
     }
 
+    let mut stdin = io::BufReader::new(io::stdin()).lines().fuse();
+
     loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => println!("Listening on {:?}", address),
-            SwarmEvent::Behaviour(event) => println!("{:?}", event),
-            _ => {}
+        // https://docs.rs/futures/latest/futures/macro.select.html
+        // Poll events
+        select! {
+            line = stdin.select_next_some() => {
+                if let Err(e) = swarm
+                    .behaviour_mut()
+                    .publish(topic.clone(), line.expect("Stdin not to close").as_bytes())
+                {
+                    println!("Publish error: {:?}", e);
+                }
+            },
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::Behaviour(GossipsubEvent::Message {
+                    propagation_source: peer_id,
+                    message_id: _,
+                    message,
+                }) => println!(
+                    "[{}] {}",
+                    peer_id,
+                    String::from_utf8_lossy(&message.data),
+                ),
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Listening on {:?}", address);
+                }
+                SwarmEvent::Behaviour(GossipsubEvent::Subscribed {
+                    peer_id,
+                    topic,
+                }) if "test-net" == format!("{}", topic) => println!("New neighbor joined!: {}", peer_id),
+                _ => {}
+            }
         }
     }
 }
