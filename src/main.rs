@@ -4,6 +4,7 @@ use futures::prelude::*;
 use futures::select;
 use libp2p::gossipsub::GossipsubEvent;
 use libp2p::gossipsub::IdentTopic as Topic;
+use libp2p::gossipsub::error::PublishError;
 use libp2p::gossipsub::{MessageAuthenticity, ValidationMode, GossipsubMessage, MessageId};
 use libp2p::{identity, Multiaddr, PeerId, gossipsub};
 use libp2p::swarm::{Swarm, SwarmEvent};
@@ -60,11 +61,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Poll events
         select! {
             line = stdin.select_next_some() => {
-                if let Err(e) = swarm
+                match swarm
                     .behaviour_mut()
                     .publish(topic.clone(), line.expect("Stdin not to close").as_bytes())
                 {
-                    println!("Publish error: {:?}", e);
+                    Err(PublishError::InsufficientPeers) => println!("There is no friends to talk with you :(. Share your address!"),
+                    Err(e) => println!("Publish error: {:?}", e),
+                    _ => {},
                 }
             },
             event = swarm.select_next_some() => match event {
